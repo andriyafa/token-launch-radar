@@ -148,3 +148,40 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+.sandbox {
+  margin-top: var(--step-4);
+  padding: var(--step-5);
+  display: grid;
+  gap: var(--step-3);
+  border-left: 3px solid var(--accent);
+}
+
+.sandbox-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--step-3);
+  padding-top: var(--step-3);
+  border-top: 1px solid var(--border);
+}
+
+.sandbox-controls .field input {
+  min-width: 140px;
+}
+
+.sandbox-controls .button {
+  align-self: end;
+}
+
+.sandbox-results {
+  display: grid;
+  gap: var(--step-3);
+  margin-top: var(--step-3);
+}
+
+.sandbox-results .table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  overflow-x: auto;
+}

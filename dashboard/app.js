@@ -127,6 +127,114 @@
     ].map(stepText);
   }
 
+  // --- Model sandbox (what-if only): rescores the 200 rows client-side;
+  // it never touches DATA, board.json or the submitted board. ---
+var SANDBOX_DEFAULTS = {
+  base_multiple: 0.25,
+  growth_weight: 0.5,
+  growth_floor: -60,
+  growth_cap: 120,
+  maturity_days: 1095,
+  chain_span: 0.18,
+  cat_dir: 'premium'
+};
+
+var sandbox = {
+  base_multiple: 0.25,
+  growth_weight: 0.5,
+  growth_floor: -60,
+  growth_cap: 120,
+  maturity_days: 1095,
+  chain_span: 0.18,
+  cat_dir: 'premium'
+};
+
+function sandboxCat(row, model, dir) {
+  if (row.category === null || row.category === undefined) {
+    return model.cat_null;
+  }
+  var freqMap = DATA.category_freq;
+  var fMax = DATA.category_freq_max;
+  if (!freqMap || typeof freqMap !== 'object' || !fMax) {
+    return model.cat_null;
+  }
+  var f = freqMap[row.category];
+  if (f === null || f === undefined) f = 0;
+  if (f < model.cat_rare_below) {
+    return model.cat_rare;
+  }
+  if (dir === 'inverted') {
+    return model.cat_base + model.cat_span * (1 - f / fMax);
+  }
+  return model.cat_base + model.cat_span * (f / fMax);
+}
+
+function sandboxImplied(row, p) {
+  var m = DATA.model;
+  var growth = Math.min(p.growth_cap, Math.max(p.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
+  var growthMult = 1 + (growth / 100) * p.growth_weight;
+  var age = row.age_days === null || row.age_days === undefined ? m.unknown_age_days : row.age_days;
+  var maturity = m.maturity_floor + (Math.min(Math.max(age, 0), p.maturity_days) / p.maturity_days) * m.maturity_range;
+  var cat = sandboxCat(row, m, p.cat_dir);
+  var chainCount = row.chains && row.chains.length ? row.chains.length : 1;
+  var chainMult = Math.min(m.chain_cap, m.chain_base + p.chain_span * (Math.min(chainCount - 1, m.chain_steps) / m.chain_steps));
+  var concMult = 1 + m.conc_weight * Math.min(row.tvl_usd / m.conc_tvl_ref, 1);
+  return Math.max(1, Math.round(row.tvl_usd * p.base_multiple * cat * growthMult * maturity * chainMult * concMult));
+}
+
+function sandboxRanking(p) {
+  var rows = DATA.rows || [];
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    out.push({
+      slug: r.slug,
+      name: r.name,
+      category: r.category,
+      implied: sandboxImplied(r, p),
+      submittedRank: r.rank
+    });
+  }
+  out.sort(function (a, b) {
+    if (b.implied !== a.implied) return b.implied - a.implied;
+    if (a.slug < b.slug) return -1;
+    if (a.slug > b.slug) return 1;
+    return 0;
+  });
+  for (var j = 0; j < out.length; j++) {
+    out[j].sandboxRank = j + 1;
+    out[j].delta = out[j].submittedRank - out[j].sandboxRank;
+  }
+  return out;
+}
+
+function sandboxSummary(ranking) {
+  var top = ranking.slice(0, 10);
+  var topSlugs = {};
+  for (var i = 0; i < top.length; i++) topSlugs[top[i].slug] = true;
+  var rows = DATA.rows || [];
+  var overlap = 0;
+  for (var j = 0; j < rows.length; j++) {
+    if (rows[j].rank <= 10 && topSlugs[rows[j].slug]) overlap++;
+  }
+  var moved = 0;
+  var biggest = null;
+  for (var k = 0; k < ranking.length; k++) {
+    var row = ranking[k];
+    if (row.delta !== 0) moved++;
+    if (biggest === null || Math.abs(row.delta) > Math.abs(biggest.delta)) biggest = row;
+  }
+  var biggestOut = null;
+  if (biggest !== null) {
+    biggestOut = {
+      slug: biggest.slug,
+      submittedRank: biggest.submittedRank,
+      sandboxRank: biggest.sandboxRank,
+      delta: biggest.delta
+    };
+  }
+  return { overlap: overlap, moved: moved, biggest: biggestOut };
+}
   function readHash() {
     var hash = window.location.hash.replace(/^#/, '');
     if (!hash) return;
@@ -438,6 +546,122 @@
     }
   }
 
+var sandboxPanelEl = null;
+
+function sandboxPanel() {
+  var inputs = {};
+  var premiumBtn = el('button', {
+    type: 'button',
+    'aria-pressed': sandbox.cat_dir === 'premium' ? 'true' : 'false',
+    text: 'Frequency premium',
+    onclick: function () {
+      sandbox.cat_dir = 'premium';
+      refreshToggle();
+      renderSandbox();
+    }
+  });
+  var invertedBtn = el('button', {
+    type: 'button',
+    'aria-pressed': sandbox.cat_dir === 'inverted' ? 'true' : 'false',
+    text: 'Inverted',
+    onclick: function () {
+      sandbox.cat_dir = 'inverted';
+      refreshToggle();
+      renderSandbox();
+    }
+  });
+  function refreshToggle() {
+    premiumBtn.setAttribute('aria-pressed', sandbox.cat_dir === 'premium' ? 'true' : 'false');
+    invertedBtn.setAttribute('aria-pressed', sandbox.cat_dir === 'inverted' ? 'true' : 'false');
+  }
+  function numberField(id, label, key, min, max, step) {
+    var input = el('input', {
+      type: 'number',
+      id: id,
+      value: String(sandbox[key]),
+      min: min,
+      max: max,
+      step: step,
+      'aria-label': label,
+      oninput: function () {
+        var v = parseFloat(input.value);
+        if (isNaN(v)) return;
+        sandbox[key] = v;
+        renderSandbox();
+      }
+    });
+    inputs[key] = input;
+    return el('div', { class: 'field' }, el('label', { 'for': id, text: label }), input);
+  }
+  var controls = el('div', { class: 'sandbox-controls' },
+    numberField('sandbox-base_multiple', 'Base multiple', 'base_multiple', 0, 1, 0.05),
+    numberField('sandbox-growth_weight', 'Growth weight', 'growth_weight', 0, 2, 0.1),
+    numberField('sandbox-growth_floor', 'Growth floor %', 'growth_floor', -100, 0, 10),
+    numberField('sandbox-growth_cap', 'Growth cap %', 'growth_cap', 0, 300, 10),
+    numberField('sandbox-maturity_days', 'Age tau (days)', 'maturity_days', 180, 3650, 365),
+    numberField('sandbox-chain_span', 'Chain weight', 'chain_span', 0, 0.5, 0.02),
+    el('div', { class: 'field' },
+      el('span', { class: 'sub', text: 'Category direction' }),
+      el('div', { class: 'tabs' }, premiumBtn, invertedBtn)
+    ),
+    el('button', {
+      type: 'button',
+      class: 'button',
+      text: 'Reset to submitted model',
+      onclick: function () {
+        for (var k in SANDBOX_DEFAULTS) sandbox[k] = SANDBOX_DEFAULTS[k];
+        for (var param in inputs) {
+          if (inputs.hasOwnProperty(param)) inputs[param].value = String(sandbox[param]);
+        }
+        refreshToggle();
+        renderSandbox();
+      }
+    })
+  );
+  var results = el('div', { class: 'sandbox-results' });
+  var section = el('section', { class: 'panel sandbox' },
+    el('h2', { text: 'Model sandbox — what-if only' }),
+    el('p', { class: 'sub', text: 'Change the model constants and see the ranking move. This never changes the submitted board: board.json and data.js are untouched, and the board above always shows the submitted radar-2 ranking.' }),
+    controls,
+    results
+  );
+  sandboxPanelEl = section;
+  renderSandbox();
+  return section;
+}
+
+function renderSandbox() {
+  if (!sandboxPanelEl) return;
+  var results = sandboxPanelEl.querySelector('.sandbox-results');
+  if (!results) return;
+  var ranking = sandboxRanking(sandbox);
+  var summary = sandboxSummary(ranking);
+  results.textContent = '';
+  results.appendChild(el('p', { class: 'sub', text: 'Top-10 overlap with the submitted board: ' + summary.overlap + ' / 10 · ' + summary.moved + ' of ' + DATA.board_size + ' rows changed rank' + (summary.moved > 0 && summary.biggest ? ' · Biggest mover: ' + summary.biggest.slug + ' (submitted rank ' + summary.biggest.submittedRank + ' to sandbox rank ' + summary.biggest.sandboxRank + ', ' + (summary.biggest.delta > 0 ? '+' : '') + summary.biggest.delta + ')' : '') }));
+  results.appendChild(el('div', { class: 'table-wrap' },
+    el('table', null,
+      el('caption', { class: 'sub', text: 'Sandbox ranking: the same 200 protocols rescored with the sandbox constants.' }),
+      el('thead', null,
+        el('tr', null,
+          el('th', { scope: 'col', text: 'Sandbox rank' }),
+          el('th', { scope: 'col', text: 'Protocol' }),
+          el('th', { scope: 'col', text: 'Sandbox implied value' }),
+          el('th', { scope: 'col', text: 'Submitted rank' }),
+          el('th', { scope: 'col', text: 'Rank change' })
+        )
+      ),
+      el('tbody', null, ranking.slice(0, 20).map(function (r) {
+        return el('tr', null,
+          el('td', { class: 'num', text: String(r.sandboxRank) }),
+          el('td', null, el('b', { text: r.name })),
+          el('td', { class: 'num', text: fmtUsd(r.implied) }),
+          el('td', { class: 'num', text: String(r.submittedRank) }),
+          el('td', { class: 'num ' + (r.delta > 0 ? 'pos' : r.delta < 0 ? 'neg' : ''), text: (r.delta > 0 ? '+' : '') + String(r.delta) })
+        );
+      }))
+    )
+  ));
+}
   function render() {
     app.textContent = '';
     var shell = el('div', { class: 'shell' });
@@ -446,6 +670,7 @@
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') shell.appendChild(sandboxPanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
@@ -454,6 +679,7 @@
 
   readHash();
   render();
+  window.RADAR_SANDBOX = { defaults: SANDBOX_DEFAULTS, implied: sandboxImplied, ranking: sandboxRanking, summary: sandboxSummary };
   window.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && dialog.open) dialog.close();
   });
