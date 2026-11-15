@@ -33,7 +33,24 @@
     var growthMult = 1 + (growth / 100) * model.growth_weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity));
+    var cat;
+    if (row.category === null || row.category === undefined) {
+      cat = model.cat_null;
+    } else {
+      var freqMap = DATA.category_freq;
+      var fMax = DATA.category_freq_max;
+      if (!freqMap || typeof freqMap !== 'object' || !fMax) {
+        cat = model.cat_null;
+      } else {
+        var f = freqMap[row.category];
+        if (f === null || f === undefined) f = 0;
+        cat = f < model.cat_rare_below ? model.cat_rare : model.cat_base + model.cat_span * (f / fMax);
+      }
+    }
+    var chainCount = row.chains && row.chains.length ? row.chains.length : 1;
+    var chainMult = Math.min(model.chain_cap, model.chain_base + model.chain_span * (Math.min(chainCount - 1, model.chain_steps) / model.chain_steps));
+    var concMult = 1 + model.conc_weight * Math.min(row.tvl_usd / model.conc_tvl_ref, 1);
+    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * cat * growthMult * maturity * chainMult * concMult));
   }
 
   function el(tag, attrs) {
@@ -97,13 +114,16 @@
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
+    var depth = (p.chains && p.chains.length > 1)
+      ? { text: 'Take a second position on a second chain from the row\'s chains: repeat the same action on ' + p.chains[1] + ' so the protocol counts activity on both networks.', cost: 'about $4 of gas on the second chain', time: '15 minutes' }
+      : { text: 'Deepen the position on the primary chain instead: add to the same ' + chain + ' position rather than opening a new one.', cost: 'about $4 of gas on the same chain', time: '15 minutes' };
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
       { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
+      { text: depth.text, cost: depth.cost, time: depth.time },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
+      { text: 'Before you withdraw, open the protocol\'s own points or rewards page and claim only from the link it publishes, then write the wallet, the dates and every transaction in a farm log.', cost: 'no fee to check, and never pay to claim', time: '10 minutes' }
     ].map(stepText);
   }
 
@@ -287,9 +307,9 @@
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x ' + m.base_multiple + ' x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
+        'implied = round( tvl_usd x ' + m.base_multiple + ' x CAT(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x CHAIN(chains) x CONC(tvl) )'
       ),
-      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' })
+      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Category frequency, chain count and TVL size each scale the value by a bounded factor; the page shows each multiplier in the detail view. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' })
     );
   }
 
@@ -319,6 +339,9 @@
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
+        el('div', null, el('span', { text: 'Category multiplier' }), el('b', { class: 'num', text: String(row.cat_multiplier) })),
+        el('div', null, el('span', { text: 'Chain multiplier' }), el('b', { class: 'num', text: String(row.chain_multiplier) })),
+        el('div', null, el('span', { text: 'Concentration multiplier' }), el('b', { class: 'num', text: String(row.conc_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
