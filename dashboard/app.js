@@ -5,8 +5,18 @@
   'use strict';
 
   var DATA = window.RADAR;
-  if (!DATA) return;
   var app = document.getElementById('board');
+  if (!app) return;
+  if (!DATA || !Array.isArray(DATA.rows) || !Array.isArray(DATA.live) || !DATA.model) {
+    app.appendChild(el('div', { class: 'panel' },
+      el('div', { class: 'empty' },
+        el('h2', { text: 'Radar data failed to load' }),
+        el('p', { text: 'The snapshot data (data.js) did not load, so there is nothing to rank. Check the file is next to the dashboard and reload the page.' }),
+        el('button', { class: 'button primary', type: 'button', text: 'Reload the page', onclick: function () { window.location.reload(); } })
+      )
+    ));
+    return;
+  }
   var state = { q: '', category: 'all', chain: '', watchlist: false, notoken: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
