@@ -58,12 +58,13 @@ function main(): void {
   writeFileSync(join(out, 'board.json'), boardText, 'utf8');
 
   // The dashboard's data, one script the page loads before its own code.
-  // The model block carries the submitted constants plus the category
-  // frequencies, so the page can recompute the same values client-side.
+  // The model block carries the submitted constants, the fitted value
+  // law with its blind-check numbers, and the category frequencies, so
+  // the page can recompute the same values client-side.
   const data = {
     as_of: snap.as_of,
     floor_usd: snap.floor_usd,
-    model: { ...MODEL_PARAMS, freqs: built.freqs, fmax: built.top },
+    model: { ...MODEL_PARAMS, fit: built.law, freqs: built.freqs, fmax: built.top },
     watchlist: snap.watchlist,
     rows: built.rows,
     live: built.live,
@@ -84,7 +85,9 @@ function main(): void {
 
   const top = built.rows[0];
   const dossierBytes = Buffer.byteLength(dossier, 'utf8');
+  const law = built.law;
   console.log(`board: ${built.rows.length} rows, rank 1 ${top ? top.slug : 'none'} $${top ? top.implied_value_usd : 0}`);
+  console.log(`law: ${law.nComps} comps, mcap ~ $${law.scale.toFixed(0)} x TVL^${law.exponent.toFixed(3)}, R2 ${law.r2.toFixed(3)}, OOS median log-err ${law.oosMedianLogErr.toFixed(3)} (${(law.oosWithin2x * 100).toFixed(0)}% within 2x) vs fixed multiple ${law.baseMedianLogErr.toFixed(3)} (${(law.baseWithin2x * 100).toFixed(0)}% within 2x)`);
   console.log(`live: ${built.live.length} rows, dossier ${dossierBytes} bytes, wrote ${out}`);
 }
 
