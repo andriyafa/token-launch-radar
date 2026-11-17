@@ -42,6 +42,7 @@ function shortChains(chains) {
 var MODEL = null;
 var FREQS = {};
 var FMAX = 1;
+var FIT = null;
 
 function catFor(category, inverted) {
   if (category === null || category === undefined) return 0.85;
@@ -83,7 +84,10 @@ function multsFor(row, opts) {
   var mat = matFor(row.age_days, opts.ageTau);
   var chain = chainFor(row.chains ? row.chains.length : 0, opts.chainSpan);
   var conc = concFor(row.tvl_usd);
-  var raw = opts.base * row.tvl_usd * cat * growth * mat * chain * conc;
+  var fit = FIT || { scale: 0.25, exponent: 1 };
+  var scale = fit.scale * (opts.base === undefined ? 1 : opts.base);
+  var exponent = opts.exponent === undefined ? fit.exponent : opts.exponent;
+  var raw = scale * Math.pow(row.tvl_usd, exponent) * cat * growth * mat * chain * conc;
   var value = Math.max(1, Math.round(raw));
   return { value: value, cat: cat, growth: growth, mat: mat, chain: chain, conc: conc };
 }
@@ -96,8 +100,10 @@ function ivFor(row, opts) {
 
 function sandboxDefaults() {
   var m = MODEL || {};
+  var fit = (m.fit && typeof m.fit.exponent === 'number') ? m.fit : { scale: 0.25, exponent: 1 };
   return {
-    base: m.base === undefined ? 0.25 : m.base,
+    base: 1,
+    exponent: fit.exponent,
     growthWeight: m.growth_weight === undefined ? 0.5 : m.growth_weight,
     growthFloor: m.growth_floor === undefined ? -60 : m.growth_floor,
     growthCap: m.growth_cap === undefined ? 120 : m.growth_cap,
@@ -167,6 +173,8 @@ if (typeof DATA !== 'undefined' && DATA && DATA.model) {
   MODEL = DATA.model;
   FREQS = DATA.model.freqs || {};
   FMAX = DATA.model.fmax || 1;
+  FIT = DATA.model.fit || null;
+  FIT = DATA.model.fit || null;
 }
 
 // --- missing-data error state -------------------------------------------
@@ -555,8 +563,14 @@ function buildModelPanel() {
   var panel = mk('section', 'panel model-panel');
   panel.appendChild(mk('h2', null, 'How the value is worked out'));
   var m = DATA.model;
-  panel.appendChild(mk('p', null, 'Implied value = base × TVL × CAT × GROWTH × MAT × CHAIN × CONC, with base ' + m.base + '. Every term comes from the protocol\u2019s own snapshot record: its TVL, its seven-day growth, how long it has run with no token, its category\u2019s frequency, its chain count, and its size.'));
-  panel.appendChild(mk('p', null, 'CAT is a frequency premium: deeper categories score higher, thin ones score lower. The sandbox below can flip it to the inverted direction to see what changes. Nothing here is a hardcoded list of names.'));
+  var fit = m.fit;
+  if (fit && typeof fit.exponent === 'number' && typeof fit.nComps === 'number') {
+    panel.appendChild(mk('p', null, 'Implied value = fitted value law × CAT × GROWTH × MAT × CHAIN × CONC. The value law is fitted from this snapshot itself: least squares on the ' + fit.nComps + ' traded protocols that carry both a market cap and TVL gives market cap ≈ $' + Math.round(fit.scale).toLocaleString('en-US') + ' × TVL^' + fit.exponent.toFixed(2) + ' (log-log R² ' + fit.r2.toFixed(2) + '). A token is worth less per dollar of TVL as TVL grows — the exponent is below 1 in every cut of the comparables.'));
+    panel.appendChild(mk('p', null, 'Blind check: holding out every fifth comparable by slug and refitting, the law predicts the held-out market caps with median log error ' + fit.oosMedianLogErr.toFixed(2) + ' (' + Math.round(fit.oosWithin2x * 100) + '% within 2×), against ' + fit.baseMedianLogErr.toFixed(2) + ' (' + Math.round(fit.baseWithin2x * 100) + '% within 2×) for one fixed multiple fitted the same way. Per-category multiples were tried and dropped — they scored worse out of sample than one fitted law.'));
+  } else {
+    panel.appendChild(mk('p', null, 'Implied value = fitted value law × CAT × GROWTH × MAT × CHAIN × CONC. The value law is fitted from this snapshot itself, from the traded protocols that carry both a market cap and TVL.'));
+  }
+  panel.appendChild(mk('p', null, 'Every term comes from the protocol\u2019s own snapshot record: its TVL, its seven-day growth, how long it has run with no token, its category\u2019s frequency, its chain count, and its size. CAT is a frequency premium: deeper categories score higher, thin ones score lower. The sandbox below can flip it to the inverted direction to see what changes. Nothing here is a hardcoded list of names.'));
   panel.appendChild(mk('p', 'model-meta', 'Snapshot ' + DATA.as_of + ' · ' + DATA.rows.length + ' pre-token rows · watchlist ' + DATA.watchlist.length + ' · model ' + m.name));
   return panel;
 }
@@ -619,7 +633,8 @@ function buildSandbox(panel) {
   sbParams = sandboxDefaults();
   var controls = mk('div', 'sb-controls');
   var defs = [
-    { key: 'base', label: 'Base multiple', step: '0.05' },
+    { key: 'base', label: 'Base scale', step: '0.1' },
+    { key: 'exponent', label: 'TVL exponent', step: '0.05' },
     { key: 'growthWeight', label: 'Growth weight', step: '0.1' },
     { key: 'growthFloor', label: 'Growth floor', step: '5' },
     { key: 'growthCap', label: 'Growth cap', step: '5' },
@@ -722,6 +737,7 @@ function boot() {
   MODEL = DATA.model;
   FREQS = DATA.model.freqs || {};
   FMAX = DATA.model.fmax || 1;
+  FIT = DATA.model.fit || null;
   buildPage(host);
 }
 
