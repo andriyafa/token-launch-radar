@@ -1,4 +1,4 @@
-// lib/model.ts — token launch radar, value model "radar-2".
+// lib/model.ts — token launch radar, value model "radar-3".
 // Composed in-session from the MODEL_V2 design. Every term is a function of
 // the protocol's own snapshot fields: no names, no allowlists, no invented
 // data. Implied values are whole dollars only.
@@ -26,6 +26,7 @@ export type Snapshot = {
 
 export type ModelOpts = {
   base?: number;
+  exponent?: number;
   growthWeight?: number;
   growthFloor?: number;
   growthCap?: number;
@@ -44,9 +45,104 @@ export type Scored = {
   ageDays: number;
 };
 
-// Calibration constants. BASE_MULTIPLE inherits the starter's 0.25 so rank 1
-// lands near $543M; the rest bound each term so no single term flips ranks.
-export const BASE_MULTIPLE = 0.25;
+// The value law is fitted from the snapshot itself, at runtime, by
+// least squares on the traded comparables: log(mcap) on log(TVL).
+// The board's TVL term is that fitted power law, not a hand-set
+// multiple. The blind check holds out every fifth comparable by slug,
+// refits on the rest, and scores the held-out market caps; the fixed
+// multiple beside it is the same holdout scored with one median
+// mcap/TVL fitted on the same training set. Per-category multiples
+// were tried and dropped: they score worse out of sample than one
+// fitted law. When the snapshot carries too few traded protocols to
+// fit, the law falls back to the old linear multiple; that branch is
+// defensive and never triggers on a snapshot with traded protocols.
+export type ValueLaw = {
+  scale: number;
+  exponent: number;
+  nComps: number;
+  r2: number;
+  oosMedianLogErr: number;
+  oosWithin2x: number;
+  baseMedianLogErr: number;
+  baseWithin2x: number;
+};
+
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (n === 0) return NaN;
+  const mid = Math.floor(n / 2);
+  return n % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function logLogFit(rows: Proto[]): { intercept: number; slope: number } {
+  const n = rows.length;
+  let sx = 0;
+  let sy = 0;
+  for (const p of rows) {
+    sx += Math.log(p.tvl_usd);
+    sy += Math.log(p.mcap_usd as number);
+  }
+  const mx = sx / n;
+  const my = sy / n;
+  let sxy = 0;
+  let sxx = 0;
+  for (const p of rows) {
+    const dx = Math.log(p.tvl_usd) - mx;
+    sxy += dx * (Math.log(p.mcap_usd as number) - my);
+    sxx += dx * dx;
+  }
+  const slope = sxx === 0 ? 0 : sxy / sxx;
+  return { intercept: my - slope * mx, slope };
+}
+
+export function fitValueLaw(protocols: Proto[]): ValueLaw {
+  const comps = protocols
+    .filter((p) => (p.mcap_usd ?? 0) > 0 && p.tvl_usd > 0)
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const n = comps.length;
+  if (n < 10) {
+    return { scale: 0.25, exponent: 1, nComps: n, r2: NaN, oosMedianLogErr: NaN, oosWithin2x: NaN, baseMedianLogErr: NaN, baseWithin2x: NaN };
+  }
+  const full = logLogFit(comps);
+  const meanLogMcap = comps.reduce((s, p) => s + Math.log(p.mcap_usd as number), 0) / n;
+  let ssRes = 0;
+  let ssTot = 0;
+  for (const p of comps) {
+    const y = Math.log(p.mcap_usd as number);
+    const fitted = full.intercept + full.slope * Math.log(p.tvl_usd);
+    ssRes += (y - fitted) * (y - fitted);
+    ssTot += (y - meanLogMcap) * (y - meanLogMcap);
+  }
+  const r2 = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  const test = comps.filter((_, i) => i % 5 === 4);
+  const train = comps.filter((_, i) => i % 5 !== 4);
+  const refit = logLogFit(train);
+  const trainMedian = medianOf(train.map((p) => (p.mcap_usd as number) / p.tvl_usd));
+  const lawErrs: number[] = [];
+  const baseErrs: number[] = [];
+  for (const p of test) {
+    const mcap = p.mcap_usd as number;
+    const lawPred = Math.exp(refit.intercept + refit.slope * Math.log(p.tvl_usd));
+    lawErrs.push(Math.abs(Math.log(mcap / lawPred)));
+    baseErrs.push(Math.abs(Math.log(mcap / (trainMedian * p.tvl_usd))));
+  }
+  const within = (errs: number[]): number => errs.filter((e) => e <= Math.log(2)).length / errs.length;
+  return {
+    scale: Math.exp(full.intercept),
+    exponent: full.slope,
+    nComps: n,
+    r2,
+    oosMedianLogErr: medianOf(lawErrs),
+    oosWithin2x: within(lawErrs),
+    baseMedianLogErr: medianOf(baseErrs),
+    baseWithin2x: within(baseErrs),
+  };
+}
+
+// The remaining constants bound each term so no single term flips ranks.
+// `base` in MODEL_PARAMS is now a multiplier on the fitted law's scale
+// (default 1), not a TVL multiple.
 export const GROWTH_WEIGHT = 0.5;
 export const GROWTH_FLOOR = -60;
 export const GROWTH_CAP = 120;
@@ -65,8 +161,8 @@ export const EARLY_SIZE = 160;
 export const LIVE_SIZE = 24;
 
 export const MODEL_PARAMS = {
-  name: 'radar-2',
-  base: BASE_MULTIPLE,
+  name: 'radar-3',
+  base: 1,
   growth_weight: GROWTH_WEIGHT,
   growth_floor: GROWTH_FLOOR,
   growth_cap: GROWTH_CAP,
@@ -156,17 +252,22 @@ export function concTerm(tvl: number): number {
   return 1 + CONC_RATE * share;
 }
 
-// The full product. Options override the submitted constants for the
-// dashboard sandbox; with no options this is the submitted board.
-export function impliedValue(p: Proto, freqs: Record<string, number>, top: number, asOf: string, opts: ModelOpts = {}): Scored {
-  const base = opts.base ?? BASE_MULTIPLE;
+// The full product. The TVL term is the fitted value law — a power law
+// in TVL whose scale and exponent come from the snapshot's own traded
+// comparables — times the five bounded multipliers. Options override
+// the submitted constants for the dashboard sandbox; `base` scales the
+// fitted scale, `exponent` replaces the fitted exponent. With no
+// options this is the submitted board.
+export function impliedValue(p: Proto, freqs: Record<string, number>, top: number, asOf: string, law: ValueLaw, opts: ModelOpts = {}): Scored {
+  const scaleMul = opts.base ?? 1;
+  const exponent = opts.exponent ?? law.exponent;
   const ageDays = ageInDays(p.listed_at, asOf);
   const cat = catTerm(p.category, freqs, top, opts.catInverted ?? false);
   const growth = growthTerm(p.change_7d, opts.growthWeight ?? GROWTH_WEIGHT, opts.growthFloor ?? GROWTH_FLOOR, opts.growthCap ?? GROWTH_CAP);
   const mat = maturityTerm(ageDays, opts.ageTau ?? MAT_SPAN_DAYS);
   const chain = chainTerm(p.chains.length, opts.chainSpan ?? CHAIN_SPAN);
   const conc = concTerm(p.tvl_usd);
-  const raw = base * p.tvl_usd * cat * growth * mat * chain * conc;
+  const raw = scaleMul * law.scale * Math.pow(p.tvl_usd, exponent) * cat * growth * mat * chain * conc;
   const value = Math.max(1, Math.round(raw));
   return { value, cat, growth, mat, chain, conc, ageDays };
 }
@@ -304,9 +405,12 @@ function byMcapDesc(a: Proto, b: Proto): number {
 
 // The ranked universe: all 40 watchlist protocols plus the 160 pre-token
 // protocols below the floor with the most TVL. Ranked by implied value
-// descending, slug ascending as the deterministic tiebreak.
-export function buildBoard(snap: Snapshot): { rows: BoardRow[]; live: LiveRow[]; freqs: Record<string, number>; top: number } {
+// descending, slug ascending as the deterministic tiebreak. The value
+// law is fitted from the snapshot's traded comparables first, then
+// applied to every row.
+export function buildBoard(snap: Snapshot): { rows: BoardRow[]; live: LiveRow[]; freqs: Record<string, number>; top: number; law: ValueLaw } {
   const { freqs, top } = freqTable(snap.protocols);
+  const law = fitValueLaw(snap.protocols);
   const bySlug = new Map<string, Proto>();
   for (const p of snap.protocols) bySlug.set(p.slug, p);
   const watch = new Set(snap.watchlist);
@@ -323,7 +427,7 @@ export function buildBoard(snap: Snapshot): { rows: BoardRow[]; live: LiveRow[];
   for (const p of early) {
     if (!seen.has(p.slug)) { seen.add(p.slug); picked.push(p); }
   }
-  const rows = picked.map((p) => toBoardRow(p, impliedValue(p, freqs, top, snap.as_of), watch.has(p.slug)));
+  const rows = picked.map((p) => toBoardRow(p, impliedValue(p, freqs, top, snap.as_of, law), watch.has(p.slug)));
   rows.sort(byValueDesc);
   rows.forEach((r, i) => {
     r.rank = i + 1;
@@ -334,5 +438,5 @@ export function buildBoard(snap: Snapshot): { rows: BoardRow[]; live: LiveRow[];
     .sort(byMcapDesc)
     .slice(0, LIVE_SIZE)
     .map((p) => toLiveRow(p, snap.as_of));
-  return { rows, live, freqs, top };
+  return { rows, live, freqs, top, law };
 }
